@@ -1,13 +1,13 @@
 #!/bin/bash
 # build_deb.sh — 打包 IOSDecryptHub rootless / roothide 越狱 deb
 #
-# dylib:
-#   vendor/dylib/rootless/decrypt_helper.dylib   (arm64)
-#   vendor/dylib/roothide/decrypt_helper.dylib   (arm64 + arm64e)
+# dylib（引擎，由本仓 src/ 编译后落在 vendor/ 下，不入版本库）:
+#   vendor/dylib/rootless/decrypt_helper.dylib   VARIANT=rootless, arm64
+#   vendor/dylib/roothide/decrypt_helper.dylib   VARIANT=roothide, arm64 + arm64e
 #
 # 包内组件:
 #   IOSDecryptHubLoader.dylib  ElleKit 注入加载器（读名单 → dlopen 引擎，无 hook）
-#   decrypt_helper.dylib       闭源引擎（vendor 成品）
+#   decrypt_helper.dylib       运行时分析引擎（本仓 src/ 编译产物）
 #   IOSDecryptHubManager.app   管理器 App（唯一入口：应用开关 / 更新 / 关于）
 #   IOSDecryptHubUpdated       updater daemon，一次性进程（检查/安装/回滚），见 AGENTS.md
 #
@@ -62,7 +62,7 @@ CC=$(xcrun --find clang)
 LOADER_SRC="$SCRIPT_DIR/src/loader.m"
 APP_ICON="$SCRIPT_DIR/app/Icon.png"
 APP_WECHAT="$SCRIPT_DIR/app/wechat-follow.png"
-APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHVersionsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m"
+APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHVersionsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m $SCRIPT_DIR/app/DHSessionViewController.m $SCRIPT_DIR/src/session/idh_session_ipc.m"
 APP_INFO="$SCRIPT_DIR/app/Info.plist"
 APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
 DAEMON_SRC="$SCRIPT_DIR/daemon/main.m"
@@ -74,6 +74,9 @@ DAEMON_BIN="IOSDecryptHubUpdated"
 compile_loader() {
     local ARCHS="$1"
     local OUT="$2"
+    local VARIANT="$3"
+    local ROOT_HIDE=0
+    [ "$VARIANT" != "roothide" ] || ROOT_HIDE=1
     local ARCH_FLAGS=()
     local ARCH
     for ARCH in $ARCHS; do
@@ -83,7 +86,7 @@ compile_loader() {
     mkdir -p "$(dirname "$OUT")"
     $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
         -dynamiclib -install_name /usr/lib/IOSDecryptHub/IOSDecryptHubLoader.dylib \
-        -ObjC -fobjc-arc -Wall -O2 \
+        -ObjC -fobjc-arc -Wall -O2 -DIDH_ROOT_HIDE="$ROOT_HIDE" \
         -framework Foundation \
         "$LOADER_SRC" -o "$OUT"
 }
@@ -101,7 +104,7 @@ compile_app() {
     # shellcheck disable=SC2086
     $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
         -ObjC -fobjc-arc -Wall -O2 \
-        -I"$SCRIPT_DIR/src" \
+        -I"$SCRIPT_DIR/src" -DDH_PACKAGE_ARCH=\"${3}\" \
         -framework Foundation -framework UIKit -framework CoreGraphics \
         $APP_SRCS -o "$OUT"
 }
@@ -118,9 +121,61 @@ compile_daemon() {
     mkdir -p "$(dirname "$OUT")"
     $CC "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
         -ObjC -fobjc-arc -Wall -O2 \
-        -I"$SCRIPT_DIR/src" \
+        -I"$SCRIPT_DIR/src" -DDH_PACKAGE_ARCH=\"${3}\" \
         -framework Foundation \
         "$DAEMON_SRC" -o "$OUT"
+}
+
+compile_session_daemon() {
+    local ARCHS="$1" OUT="$2" VARIANT="$3"
+    local ARCH_FLAGS=() ARCH
+    local ROOT_HIDE=0
+    [ "$VARIANT" != "roothide" ] || ROOT_HIDE=1
+    for ARCH in $ARCHS; do ARCH_FLAGS+=( -arch "$ARCH" ); done
+    mkdir -p "$(dirname "$OUT")"
+    "$CC" "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+        -fobjc-arc -Wall -O2 -DIDH_ROOT_HIDE="$ROOT_HIDE" -framework Foundation -framework Security -lsqlite3 \
+        "$SCRIPT_DIR/daemon/idhjd.m" "$SCRIPT_DIR/daemon/idh_session_store.m" \
+        "$SCRIPT_DIR/daemon/idh_session_service.m" "$SCRIPT_DIR/daemon/idh_session_http.m" \
+        "$SCRIPT_DIR/src/session/idh_session_ipc.m" -o "$OUT"
+}
+
+compile_swift_fixture() {
+    local ARCHS="$1" OUT="$2" ARCH
+    local SLICES=()
+    mkdir -p "$(dirname "$OUT")"
+    for ARCH in $ARCHS; do
+        local SLICE="${OUT%.dylib}-$ARCH.dylib"
+        xcrun swiftc -swift-version 5 -parse-as-library -O -emit-library \
+            -sdk "$SDK" -target "$ARCH-apple-ios15.0" \
+            -module-name IDHSwiftFixtures \
+            -Xlinker -install_name -Xlinker @loader_path/IDHSwiftFixtures.dylib \
+            "$SCRIPT_DIR/tests/fixtures/IDHSwiftFixtures.swift" -o "$SLICE"
+        SLICES+=( "$SLICE" )
+    done
+    xcrun lipo -create "${SLICES[@]}" -output "$OUT"
+}
+
+compile_control_fixtures() {
+    local ARCHS="$1" OUT="$2" ARCH
+    local NATIVE_SLICES=() ROOT_SLICES=()
+    mkdir -p "$OUT"
+    for ARCH in $ARCHS; do
+        local NATIVE="$OUT/native-$ARCH.dylib" ROOT="$OUT/root-$ARCH.dylib"
+        xcrun --sdk iphoneos clang -arch "$ARCH" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+            -dynamiclib -fobjc-arc -O1 -g -I"$SCRIPT_DIR/src/trace" \
+            "$SCRIPT_DIR/tests/fixtures/IDHControlNativeFixtures.mm" -lc++ \
+            -Wl,-install_name,@loader_path/IDHControlNativeFixtures.dylib -o "$NATIVE"
+        xcrun --sdk iphoneos clang -arch "$ARCH" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+            -dynamiclib -fobjc-arc -O1 -g -I"$SCRIPT_DIR/src/trace" -framework Foundation \
+            "$SCRIPT_DIR/tests/fixtures/IDHControlFixtures.mm" "$NATIVE" -lc++ \
+            -Wl,-install_name,@loader_path/IDHControlFixtures.dylib -o "$ROOT"
+        NATIVE_SLICES+=( "$NATIVE" ); ROOT_SLICES+=( "$ROOT" )
+    done
+    xcrun lipo -create "${NATIVE_SLICES[@]}" -output "$OUT/IDHControlNativeFixtures.dylib"
+    xcrun lipo -create "${ROOT_SLICES[@]}" -output "$OUT/IDHControlFixtures.dylib"
+    otool -L "$OUT/IDHControlFixtures.dylib" | grep -F '@loader_path/IDHControlNativeFixtures.dylib' >/dev/null \
+        || error "owned control fixture has no packaged native helper dependency"
 }
 
 verify_macho_arch() {
@@ -138,8 +193,9 @@ require_vendor_dylib() {
     local VARIANT="$1"
     local EXPECTED_ARCH="$2"
     local DYLIB="$VENDOR_DIR/$VARIANT/decrypt_helper.dylib"
-    [ -f "$DYLIB" ] || error "缺少成品 dylib: $DYLIB
-请先由私有仓执行 make deb，或手动把对应架构的 decrypt_helper.dylib 放到该路径。"
+    [ -f "$DYLIB" ] || error "缺少引擎: $DYLIB
+请先在仓库根目录执行 make deb（会自动编译引擎并落到 vendor/dylib/），
+或手动把对应架构的 decrypt_helper.dylib 放到该路径。"
     verify_macho_arch "$DYLIB" "$EXPECTED_ARCH" "$VARIANT 主 dylib (vendor)"
     echo "$DYLIB"
 }
@@ -158,12 +214,20 @@ build_variant() {
     local LOADER_OUT="$BUILD_DIR/_loader-${VARIANT}/IOSDecryptHubLoader.dylib"
     local APP_EXEC="$BUILD_DIR/_app-${VARIANT}/$APP_NAME"
     local DAEMON_OUT="$BUILD_DIR/_daemon-${VARIANT}/$DAEMON_BIN"
+    local SESSION_OUT="$BUILD_DIR/_daemon-${VARIANT}/idhjd"
+    local SWIFT_FIXTURE_OUT="$BUILD_DIR/_swift-${VARIANT}/IDHSwiftFixtures.dylib"
+    local CONTROL_FIXTURE_DIR="$BUILD_DIR/_control-${VARIANT}"
     local ENGINE_DYLIB
 
     ENGINE_DYLIB=$(require_vendor_dylib "$VARIANT" "$MACHO_ARCHS")
-    compile_loader "$MACHO_ARCHS" "$LOADER_OUT"
-    compile_app "$APP_MACHO_ARCHS" "$APP_EXEC"
-    compile_daemon "$APP_MACHO_ARCHS" "$DAEMON_OUT"
+    compile_loader "$MACHO_ARCHS" "$LOADER_OUT" "$VARIANT"
+    compile_app "$APP_MACHO_ARCHS" "$APP_EXEC" "$ARCHITECTURE"
+    compile_daemon "$APP_MACHO_ARCHS" "$DAEMON_OUT" "$ARCHITECTURE"
+    compile_session_daemon "$APP_MACHO_ARCHS" "$SESSION_OUT" "$VARIANT"
+    # Loaded only by the explicit Swift selftest on iOS 15+. The Agent has no
+    # Swift dependency and keeps its existing iOS 14 loading compatibility.
+    compile_swift_fixture "$MACHO_ARCHS" "$SWIFT_FIXTURE_OUT"
+    compile_control_fixtures "$MACHO_ARCHS" "$CONTROL_FIXTURE_DIR"
 
     info "打包 $VARIANT (arch=$ARCHITECTURE, prefix=${PREFIX:-/})..."
     rm -rf "$STAGE"
@@ -195,10 +259,13 @@ CTRL
     cp "$SCRIPT_DIR/Filter.plist" "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.plist"
 
     cp "$ENGINE_DYLIB" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
+    cp "$SWIFT_FIXTURE_OUT" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/IDHSwiftFixtures.dylib"
+    cp "$CONTROL_FIXTURE_DIR/IDHControlFixtures.dylib" "$CONTROL_FIXTURE_DIR/IDHControlNativeFixtures.dylib" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/"
     cp "$SCRIPT_DIR/enabledBundles.default.plist" \
         "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/enabledBundles.default.plist"
     cp "$DAEMON_OUT" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
     cp "$SCRIPT_DIR/daemon/updated.sh" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/updated.sh"
+    cp "$SESSION_OUT" "$SCRIPT_DIR/daemon/sessiond.sh" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/"
 
     # 仓库公钥装进 APT 信任链：不然现代 APT 会因 Release 未受信任而报 E:
     # （"is not signed"）并拒绝更新索引 —— 用户就永远看不到新版本。
@@ -222,6 +289,12 @@ VP
 
     sed "s|@PREFIX@|${PREFIX}|g" "$DAEMON_PLIST_TMPL" \
         > "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"
+    local SESSION_ARGUMENTS="<string>${PREFIX}/usr/lib/IOSDecryptHub/idhjd</string>"
+    if [ "$VARIANT" = "roothide" ]; then
+        SESSION_ARGUMENTS="<string>/bin/sh</string><string>${PREFIX}/usr/lib/IOSDecryptHub/sessiond.sh</string>"
+    fi
+    sed "s|@SESSION_ARGUMENTS@|$SESSION_ARGUMENTS|g" "$SCRIPT_DIR/daemon/com.iosdecrypthub.sessions.plist" \
+        > "$STAGE/${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.sessions.plist"
 
     cp "$APP_EXEC" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
     sed "s/@VERSION@/${VERSION}/g" "$APP_INFO" \
@@ -336,6 +409,10 @@ printf '%s\n' \
 if command -v launchctl >/dev/null 2>&1; then
     launchctl bootout system "\$LAUNCHD_PLIST" 2>/dev/null || true
     launchctl bootstrap system "\$LAUNCHD_PLIST" 2>/dev/null || launchctl load "\$LAUNCHD_PLIST" 2>/dev/null || true
+    SESSION_PLIST="${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.sessions.plist"
+    launchctl bootout system/com.iosdecrypthub.sessions 2>/dev/null || true
+    launchctl bootstrap system "\$SESSION_PLIST" 2>/dev/null || launchctl load "\$SESSION_PLIST" 2>/dev/null \
+        || echo "IOSDecryptHub: could not register the device session service" >&2
 fi
 # 刷新主屏幕图标（失败不阻断安装）
 if command -v uicache >/dev/null 2>&1; then
@@ -352,6 +429,7 @@ if [ "\$1" = "remove" ]; then
     LAUNCHD_PLIST="${PREFIX}/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"
     if command -v launchctl >/dev/null 2>&1; then
         launchctl bootout system "\$LAUNCHD_PLIST" 2>/dev/null || true
+        launchctl bootout system/com.iosdecrypthub.sessions 2>/dev/null || true
     fi
 fi
 if [ "\$1" = "purge" ]; then
@@ -375,11 +453,19 @@ POSTRM
     verify_macho_arch \
         "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN" \
         "$APP_MACHO_ARCHS" "$VARIANT updater daemon"
+    verify_macho_arch "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/idhjd" "$APP_MACHO_ARCHS" "$VARIANT session service"
 
     ldid -S "$STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.dylib"
     ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
+    verify_macho_arch "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/IDHSwiftFixtures.dylib" "$MACHO_ARCHS" "$VARIANT owned Swift fixture"
+    ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/IDHSwiftFixtures.dylib"
+    for CONTROL_RESOURCE in IDHControlFixtures IDHControlNativeFixtures; do
+        verify_macho_arch "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$CONTROL_RESOURCE.dylib" "$MACHO_ARCHS" "$VARIANT owned native control fixture"
+        ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$CONTROL_RESOURCE.dylib"
+    done
     ldid -S"$APP_ENTITLEMENTS" "$STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
     ldid -S "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
+    ldid -S"$SCRIPT_DIR/daemon/idhjd-entitlements.plist" "$STAGE/${PREFIX}/usr/lib/IOSDecryptHub/idhjd"
 
     cp -R "$STAGE/." "$PKG_STAGE/"
     find "$PKG_STAGE" -type d -exec chmod 0755 {} +
@@ -389,10 +475,12 @@ POSTRM
     chmod 0755 "$PKG_STAGE/${PREFIX}/Applications/$APP_NAME.app/$APP_NAME"
     chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/$DAEMON_BIN"
     chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/updated.sh"
+    chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/idhjd" "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/sessiond.sh"
     # 两个 dylib 用 0755：与 1.24.8 / 1.24.9（线上已验证可用）的权限完全一致，
     # 不引入任何与已验证产物不同的变量。
     chmod 0755 "$PKG_STAGE/${PREFIX}/Library/MobileSubstrate/DynamicLibraries/IOSDecryptHubLoader.dylib"
     chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/decrypt_helper.dylib"
+    chmod 0755 "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/IDHControlFixtures.dylib" "$PKG_STAGE/${PREFIX}/usr/lib/IOSDecryptHub/IDHControlNativeFixtures.dylib"
 
     if ! dpkg-deb --build --root-owner-group "$PKG_STAGE" "$DEB_OUT" 2>"$BUILD_DIR/_dpkg-$VARIANT.log"; then
         rm -rf "$PKG_STAGE"
@@ -467,6 +555,12 @@ POSTRM
         *"/Library/LaunchDaemons/com.iosdecrypthub.updated.plist"*) ;;
         *) error "$VARIANT 缺少 daemon 启动配置" ;;
     esac
+    for SESSION_FILE in usr/lib/IOSDecryptHub/idhjd usr/lib/IOSDecryptHub/sessiond.sh Library/LaunchDaemons/com.iosdecrypthub.sessions.plist; do
+        case "$PACKAGE_CONTENTS" in
+            *"/$SESSION_FILE"*) ;;
+            *) error "$VARIANT 缺少设备会话组件 $SESSION_FILE" ;;
+        esac
+    done
 
     case "$PACKAGE_CONTENTS" in
         *"/usr/lib/IOSDecryptHub/version.plist"*) ;;

@@ -1,61 +1,36 @@
-# IOSDecryptHub
+# IOSDecryptHub · Jailbreak edition
 
-[中文](README.md) | **English**
+An independent jailbreak runtime-analysis project for rootless / RootHide iOS devices. The product is one complete deb containing a persistent daemon, a phone Manager app, an injection loader and the Agent, updated together through an APT repository.
 
-Add the repo in Sileo / Zebra:
+The [TrollStore edition](https://github.com/decrypthub/IOSDecryptHubTrollStore) is a separate project. Each project maintains its own main branch, versions and releases.
 
-```
-https://ios.decrypthub.com
-```
+This is the canonical jailbreak repository under the decrypthub organization. On 2026-11-16, development from IOSDecryptHubJB was consolidated here while retaining the original repository's history, stars, issues, tags and releases. See the [consolidation notes](./docs/REPOSITORY_CONSOLIDATION_2026-11-16.md).
 
-Install the deb for your jailbreak (rootless or roothide). An **IOSDecryptHub** icon appears on the home screen: toggle target apps, check for updates and pick a version there. Force-quit a target app, then reopen it. Open `http://<device-ip>:8088` in a browser to use the live web panel:
+The Manager enables or disables injection per app and shows both saved policy and the actual running state. The daemon continues without the Manager UI; the target app follows its ordinary lifecycle. The phone owns storage, bounded analysis, web and MCP services. A PC is optional.
 
-<p align="center">
-  <img src="./docs/screenshots/webui.png" alt="IOSDecryptHub web panel: crypto event list with UTF-8 / HEX / HEXDUMP detail" width="920">
-</p>
+The injected dylib remains an internal build artifact. Users do not download, compile, select or update it separately. Package managers such as Sileo / Zebra perform complete-package updates.
 
-No app is injected by default. Depends on ellekit.
+**Source and released packages have different versions.** Main contains 1.28.28 development code, including Inline Hook, QBDI Trace and runtime-operation work; see [Progress](./docs/PROGRESS.md) for validation and limitations. This repository consolidation does not publish a new 1.28.x package. The persistent analysis service, Manager redesign and scope architecture remain roadmap items.
 
-## What's inside
+The existing [v1.27.6 complete packages](https://github.com/decrypthub/IOSDecryptHub/releases/tag/v1.27.6) have moved here with identical bytes. The website and APT source remain [ios.decrypthub.com](https://ios.decrypthub.com/), with the same package ID and signing trust. Older releases remain available. Submit jailbreak issues to [this repository](https://github.com/decrypthub/IOSDecryptHub/issues).
 
-| Component | Role |
-|-----------|------|
-| Injection loader | Reads the enabled list, `dlopen`s the engine only on a hit; contains no hooks |
-| Engine dylib | The closed-source core; every hook lives in its constructor |
-| Manager app | Home-screen icon: toggle apps, see engine version and update state, update / roll back |
-| Updater daemon | One-shot process (launched on demand by launchd) that checks, downloads, installs and rolls back the engine |
-
-## How updates work
-
-Tap "Check for updates" in the manager app; it writes a request and launchd runs the daemon:
-
-1. Resolve the latest version (reads the 302 of GitHub `releases/latest` first — no API quota; the API is only a fallback)
-2. Download the engine, verify size and Mach-O architecture (arm64 family only); anything else is discarded
-3. **Back up first** — a failed replace is restored from the backup, and no replace happens without a successful backup
-4. After the atomic swap, running target apps are terminated, so the next launch uses the new engine
-5. Rollback is a swap: it rolls back, keeps the version it just rolled off, and can roll again
-
-No reinstall and no respring needed.
-
-Build debs (macOS + Xcode + dpkg + ldid):
+For a fresh macOS checkout, prepare the iOS analysis libraries before building complete packages (Xcode and network access are required):
 
 ```bash
+brew install dpkg ldid cmake ninja
+bash tools/build_dobby_ios.sh
+bash tools/build_qbdi_ios.sh
+make test-updater
 make deb
 ```
 
-Simulated regression test for the update path (runs on macOS, no device needed, needs network):
+The static libraries are generated locally and are not tracked in Git. QBDI also builds LLVM, so its first build can take a while. CI uses the same dependency preparation and retains the complete rootless/RootHide package checks. Architecture limitations are documented under `vendor/`.
 
-```bash
-make test-updater
-```
+Design documents:
 
-## Follow
+- [Product architecture and delivery](./docs/PRODUCT_ARCHITECTURE.md)
+- [Manager UI](./docs/MANAGER_UI.md)
+- [Hook and Trace](./docs/HOOK_AND_TRACE_DESIGN.md)
+- [Progress](./docs/PROGRESS.md)
 
-Search **DecryptHub** in WeChat, or scan the QR below.
-
-<p align="center">
-  <img src="./wechat-qr.png" alt="WeChat Official Account DecryptHub" width="168">
-</p>
-
-- Telegram: https://t.me/decrypthubteam
-- X: https://x.com/decrypthub_
+[MIT license](./LICENSE); third-party notices: [NOTICE](./NOTICE).

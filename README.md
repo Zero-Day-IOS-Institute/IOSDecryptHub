@@ -1,66 +1,48 @@
-# IOSDecryptHub
+# IOSDecryptHub · 越狱版
 
-**中文** | [English](README.en.md)
+独立的 iOS 越狱运行时分析项目。面向 rootless / RootHide，以一个 deb 整包交付常驻守护程序、手机 Manager UI、注入 Loader 与 Agent 引擎，支持通过 APT 越狱源统一更新。
 
-Sileo / Zebra 添加源：
+本仓是 **IOSDecryptHub 越狱版正式主仓**，承接原 IOSDecryptHubJB 的开发历史。巨魔版独立维护于 [IOSDecryptHubTrollStore](https://github.com/decrypthub/IOSDecryptHubTrollStore)，两个版本分别维护自己的 main、版本和发布。
 
-```
-https://ios.decrypthub.com
-```
+本项目在 `decrypthub` 组织公开维护。2026-11-16 合并维护入口，保留本仓既有源码历史、Star、Issues、标签与历史 Release；原 JB 仓的 v1.27.6 完整包迁至本仓，既有官网域名、包 ID 与 APT 签名信任保持兼容。详见 [仓库整合说明](./docs/REPOSITORY_CONSOLIDATION_2026-11-16.md)。
 
-按环境安装：
+## 当前版本与使用
 
-- rootless（Dopamine、palera1n）：rootless.deb
-- roothide：roothide.deb
+[v1.28.52 完整包](https://github.com/decrypthub/IOSDecryptHub/releases/tag/v1.28.52) 提供 Rootless 与 RootHide 两种架构。添加 [签名 APT 源](https://ios.decrypthub.com/) 并在 Sileo 或 Zebra 安装 IOSDecryptHub。Manager、Loader、daemon、Agent 与资源随整包更新。
 
-装好后桌面上会多一个 **IOSDecryptHub** 图标：在这里开关要注入的 App、检查更新、看历史版本。打开目标 App 前先完全退出，再启动即可注入。浏览器打开 `http://<设备IP>:8088`，即可看到实时 Web 面板：
+在 Manager 为应用开启注入后，启动或手动重启应用。应用行的「会话」页可启用设备会话，查看应用退出后保留的摘要。配对后的 PC 可使用 [idh-cli 0.8.0](https://pypi.org/project/ios-decrypt-hub/0.8.0/) 查询记录。见[设备会话说明](./docs/DEVICE_SESSIONS.md)。
 
-<p align="center">
-  <img src="./docs/screenshots/webui.png" alt="IOSDecryptHub Web 面板：加解密事件列表与输入明文 / HEX / HEXDUMP 详情" width="920">
-</p>
+源码和问题反馈：[本仓 Issues](https://github.com/decrypthub/IOSDecryptHub/issues)。巨魔设备请使用 [巨魔版下载与说明](https://github.com/decrypthub/IOSDecryptHubTrollStore)。
 
-默认不注入任何 App。依赖 ellekit。
+## 构建与验证
 
-## 包内组件
-
-| 组件 | 作用 |
-|------|------|
-| 注入加载器 | 读启用名单，命中才 `dlopen` 引擎；不含任何 hook |
-| 引擎 dylib | 闭源核心，所有 hook 都在它的 constructor 里 |
-| 管理器 App | 桌面图标：开关应用、看引擎版本与更新状态、一键更新 / 回滚 |
-| updater daemon | 一次性进程（launchd 按需拉起），负责检查、下载、安装、回滚引擎 |
-
-## 更新机制
-
-管理器 App 里点「检查更新」→ 写入请求 → daemon 被 launchd 拉起执行：
-
-1. 取最新版本号（先读 GitHub `releases/latest` 的 302，不吃 API 配额；失败才退回 API）
-2. 下载引擎 → 校验体积与 Mach-O 架构（只认 arm64 家族），不合格直接丢弃
-3. **先备份**当前引擎，替换失败立刻用备份恢复；没有备份成功就绝不替换
-4. 原子落位后，结束已启用 App 的进程 —— 下次打开就是新引擎
-5. 回滚是 swap 语义：滚回去，备份里留着刚滚下来的版本，还能再滚回来
-
-不用卸装重装，也不用 respring。
-
-从源码打 deb（macOS + Xcode + dpkg + ldid）：
+在 Mac 上执行：
 
 ```bash
-make deb
+brew install dpkg ldid cmake ninja  # 已安装的工具可跳过
+bash tools/build_dobby_ios.sh      # 准备真实 arm64 + arm64e Inline Hook 静态库
+bash tools/build_qbdi_ios.sh       # arm64 + arm64e/PAC QBDI/LLVM，需网络且耗时较长
+make test-updater  # 无需网络或手机的版本选择/旧更新请求边界回归
+make test-hook-runtime test-unwind-runtime test-hook-ios-build # 实际汇编、ABI、栈展开
+make test-flow-runtime # 异常/longjmp 状态与有界 GCD 自有 fixture
+make deb           # 一次构建 rootless 和 RootHide 完整包
 ```
 
-更新链路的仿真回归测试（macOS 本机即可，不需要真机，需要网络）：
+Dobby/QBDI 的静态库属于本机构建产物，不纳入 Git。源码签出后须先构建这两个依赖；CI 同样先准备依赖再执行原有更新策略和整包验证，不把缺库当作引擎编译回归。arm64e 支持范围与限制见各自 `vendor/` 说明。
 
-```bash
-make test-updater
-```
+无需单独编译或从巨魔项目复制 dylib。v1.27.6 已通过 Mac 回归和双环境整包编译、包内容与签名检查；尚未在手机上验收安装、升级或包管理器跳转。详见 [当前进度](./docs/PROGRESS.md)；此前正式基线的核验记录见 [基线核验报告](./docs/BASELINE_AUDIT_2026-10-26.md)。
 
-## 关注
+## 设计与实施
 
-微信搜一搜 **DecryptHub**，点下面二维码也能加公众号。
+- [产品架构、整包与实施顺序](./docs/PRODUCT_ARCHITECTURE.md)
+- [手机 Manager 页面与交互](./docs/MANAGER_UI.md)
+- [设备会话与只读 MCP](./docs/DEVICE_SESSIONS.md)
+- [Hook / ABI / 事件 / Trace 技术设计](./docs/HOOK_AND_TRACE_DESIGN.md)
+- [项目当前进度](./docs/PROGRESS.md)
+- [开发边界](./AGENTS.md)
 
-<p align="center">
-  <img src="./wechat-qr.png" alt="微信公众号 DecryptHub" width="168">
-</p>
+优先交付基础整包与逐应用注入闭环，再完成源升级、Inline、出口采集和 Trace。内部组件自动构建完成后，rootless / RootHide 各输出本环境匹配的一份完整 deb。
 
-- Telegram：https://t.me/decrypthubteam
-- X：https://x.com/decrypthub_
+## 协议
+
+[MIT](./LICENSE)，第三方组件声明见 [NOTICE](./NOTICE)。
