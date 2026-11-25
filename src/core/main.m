@@ -65,6 +65,9 @@ static void dh_bootstrap(void) {
     dh_noise_load([docsDir stringByAppendingPathComponent:@".dh_noise.conf"]);
     dh_spoof_load([docsDir stringByAppendingPathComponent:@".dh_spoof.conf"]);
     dh_webkit_probe_load([docsDir stringByAppendingPathComponent:@".dh_webkit_probe.conf"]);
+#if DH_DEVICE_SESSIONS
+    dh_session_agent_prepare();
+#endif
     // 安装 hook —— 尽早完成, 否则早期发生的加解密会漏抓.
     dh_install_all_hooks();
     dh_diag_append(DH_DIAG_GENERAL, "INFO", "hook 安装完成 (Digest/HMAC/对称/非对称/KDF/EVP/文件/系统)");
@@ -74,7 +77,8 @@ static void dh_bootstrap(void) {
     // (实测 B站 launch 阶段被 0x8badf00d 杀掉), 起 socket/线程不该抢这段时间。
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
 #if DH_DEVICE_SESSIONS
-        if (dh_session_agent_start()) return;
+        // 设备服务固定使用 8088；进程内文件、符号和 Dump 工具继续在后续端口提供服务。
+        (void)dh_session_agent_start();
 #endif
         dh_http_start();
     });

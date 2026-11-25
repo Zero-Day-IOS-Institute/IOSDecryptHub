@@ -32,8 +32,11 @@ static int httpListener(void) {
     if (fd < 0) return -1;
     int yes = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    // 默认只绑回环（对齐 frida-server）。状态目录里放 listen-remote 标记文件才放开局域网，
+    // 等同 frida-server -l 0.0.0.0：需要 root 才能创建，属显式行为。
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(IDH_SESSION_PORT),
-                                  .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+                                  .sin_addr.s_addr = htonl(access(IDHSessionRemotePath.fileSystemRepresentation, F_OK) == 0
+                                                             ? INADDR_ANY : INADDR_LOOPBACK)};
     if (!bind(fd, (void *)&address, sizeof(address)) && !listen(fd, 8)) return fd;
     int error = errno;
     close(fd);
@@ -123,14 +126,10 @@ int main(void) {
         dispatch_source_set_event_handler(timer, ^{
             @autoreleasepool {
                 [service expire];
-                if (IDHSessionModeEnabled() && !http) {
+                if (!http) {
                     int listener = httpListener();
                     if (listener >= 0) http = serve(listener, ^(int client) { IDHSessionHandleHTTP(client, service, state); });
                     service.mcpStatus = http ? @"listening" : (errno == EADDRINUSE ? @"port_busy" : @"listen_failed");
-                } else if (!IDHSessionModeEnabled() && http) {
-                    dispatch_source_cancel(http);
-                    http = nil;
-                    service.mcpStatus = @"disabled";
                 }
             }
         });

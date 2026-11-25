@@ -37,6 +37,7 @@
 #import "dh_log_json.h"
 #import "mcp_server.h"
 #import "hook_network.h"
+#import "hook_keychain.h"
 
 #define DH_HTTP_PORT_FIRST  8088
 #define DH_HTTP_PORT_LAST   8108
@@ -615,6 +616,12 @@ static void handle_dump_image_download(int fd, NSDictionary *q) {
     [[NSFileManager defaultManager] removeItemAtPath:tmpPath error:nil];
 }
 
+// ---- Keychain 直接查看: 进程内枚举当前有权读到的条目 ----
+static void handle_keychain_items(int fd, NSDictionary *q) {
+    NSInteger limit = q[@"limit"] ? [q[@"limit"] integerValue] : 200;
+    send_json(fd, 200, dh_keychain_items(limit));
+}
+
 // ---- 宿主沙盒文件浏览 (只读) ----
 static void handle_files_list(int fd, NSDictionary *q) {
     NSError *err = nil;
@@ -909,6 +916,8 @@ static void handle_connection(int fd) {
                 handle_symbols_images(fd);
             } else if ([path isEqualToString:@"/api/symbols"]) {
                 handle_symbols(fd, q);
+            } else if ([path isEqualToString:@"/api/keychain/items"]) {
+                handle_keychain_items(fd, q);
             } else if ([path isEqualToString:@"/api/files"]) {
                 handle_files_list(fd, q);
             } else if ([path isEqualToString:@"/api/files/preview"]) {
@@ -1027,13 +1036,22 @@ static void accept_loop(void) {
 void dh_http_start(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        for (uint16_t p = DH_HTTP_PORT_FIRST; p <= DH_HTTP_PORT_LAST; p++) {
+#if DH_DEVICE_SESSIONS
+        const uint16_t firstPort = DH_HTTP_PORT_FIRST + 1;
+        const char *portRange = "8089..8108";
+        const char *portFailure = "端口 8089..8108 全被占用, 本地服务不可用";
+#else
+        const uint16_t firstPort = DH_HTTP_PORT_FIRST;
+        const char *portRange = "8088..8108";
+        const char *portFailure = "端口 8088..8108 全被占用, 本地服务不可用";
+#endif
+        for (uint16_t p = firstPort; p <= DH_HTTP_PORT_LAST; p++) {
             int fd = try_bind(p);
             if (fd >= 0) { gListenFD = fd; gPort = p; break; }
         }
         if (gListenFD < 0) {
-            NSLog(@"[IOSDecryptHub] HTTP 服务启动失败: %s..%s 端口都被占用", "8088", "8108");
-            dh_health_http_fail("端口 8088..8108 全被占用, 本地服务不可用");
+            NSLog(@"[IOSDecryptHub] HTTP 服务启动失败: %s 端口都被占用", portRange);
+            dh_health_http_fail(portFailure);
             return;
         }
         NSString *ip = get_local_ip();

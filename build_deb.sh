@@ -62,7 +62,7 @@ CC=$(xcrun --find clang)
 LOADER_SRC="$SCRIPT_DIR/src/loader.m"
 APP_ICON="$SCRIPT_DIR/app/Icon.png"
 APP_WECHAT="$SCRIPT_DIR/app/wechat-follow.png"
-APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHVersionsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m $SCRIPT_DIR/app/DHSessionViewController.m $SCRIPT_DIR/src/session/idh_session_ipc.m"
+APP_SRCS="$SCRIPT_DIR/app/DHManagerAppDelegate.m $SCRIPT_DIR/app/DHRootViewController.m $SCRIPT_DIR/app/DHStatusViewController.m $SCRIPT_DIR/app/DHSettingsViewController.m $SCRIPT_DIR/app/DHVersionsViewController.m $SCRIPT_DIR/app/DHConfigStore.m $SCRIPT_DIR/app/DHAppEnumerator.m $SCRIPT_DIR/app/DHSessionViewController.m $SCRIPT_DIR/src/session/idh_session_ipc.m"
 APP_INFO="$SCRIPT_DIR/app/Info.plist"
 APP_ENTITLEMENTS="$SCRIPT_DIR/app/entitlements.plist"
 DAEMON_SRC="$SCRIPT_DIR/daemon/main.m"
@@ -133,10 +133,15 @@ compile_session_daemon() {
     [ "$VARIANT" != "roothide" ] || ROOT_HIDE=1
     for ARCH in $ARCHS; do ARCH_FLAGS+=( -arch "$ARCH" ); done
     mkdir -p "$(dirname "$OUT")"
+    python3 "$SCRIPT_DIR/tools/gen_web.py" \
+        "$SCRIPT_DIR/web/daemon-panel.html" \
+        "$SCRIPT_DIR/daemon/panel_html.h" \
+        kDHDaemonPanelHTML
     "$CC" "${ARCH_FLAGS[@]}" -isysroot "$SDK" -miphoneos-version-min=14.0 \
         -fobjc-arc -Wall -O2 -DIDH_ROOT_HIDE="$ROOT_HIDE" -framework Foundation -framework Security -lsqlite3 \
         "$SCRIPT_DIR/daemon/idhjd.m" "$SCRIPT_DIR/daemon/idh_session_store.m" \
         "$SCRIPT_DIR/daemon/idh_session_service.m" "$SCRIPT_DIR/daemon/idh_session_http.m" \
+        "$SCRIPT_DIR/daemon/idh_device_apps.m" \
         "$SCRIPT_DIR/src/session/idh_session_ipc.m" -o "$OUT"
 }
 
