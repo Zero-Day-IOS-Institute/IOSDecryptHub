@@ -60,12 +60,12 @@ expect_present "存在 fishhook 实现" 'rebind_symbols' src/core/fishhook.c
 expect_present "存在 ObjC swizzle 实现" 'method_setImplementation|method_exchangeImplementations' src
 
 echo "== 服务与协议边界 =="
-expect_present "HTTP 首选端口保持 8088" '^#define DH_HTTP_PORT_FIRST[[:space:]]+8088$' src/server/http_server.m
+expect_present "HTTP 首选端口保持 8088" '^#define DH_HTTP_PORT_FIRST[[:space:]]+8088\r?$' src/server/http_server.m
 expect_present "MCP 路径保持 /api/mcp" '"/api/mcp"' src/server/http_server.m
 
 echo "== 设备会话与应用工具边界 =="
 expect_present "设备会话端口固定 8088" \
-    '^#define IDH_SESSION_PORT[[:space:]]+8088$' src/session/idh_session_ipc.h
+    '^#define IDH_SESSION_PORT[[:space:]]+8088\r?$' src/session/idh_session_ipc.h
 expect_present "会话变体为设备服务保留 8088" \
     'firstPort = DH_HTTP_PORT_FIRST \+ 1' src/server/http_server.m
 expect_present "会话上报不阻断进程工具服务" \
@@ -84,6 +84,13 @@ expect_present "事件按 App 连续归档" 'CREATE TABLE IF NOT EXISTS app_even
 expect_present "事件分页保持有界" 'limit > 500' daemon/idh_session_store.m
 expect_present "注入范围拒绝系统 bundle" 'com.apple.' daemon/idh_device_apps.m
 expect_present "局域网监听需要显式标记" 'IDHSessionRemotePath' daemon/idhjd.m
+expect_present "进程工具复用 idhjd 的标记常量" 'IDHSessionRemotePath' src/server/http_server.m
+expect_absent "进程内不再重复写死状态目录" '"/private/var/db/idhjd-v1' src/server
+expect_present "进程工具端口默认只绑回环" 'INADDR_LOOPBACK' src/server/http_server.m
+expect_present "巨魔/开发变体保持局域网监听" 'return YES;' src/server/http_server.m
+expect_absent "不下发通配 CORS" 'Access-Control-Allow-Origin' src/server/http_server.m
+expect_present "统计接口报告监听范围" '"listen"' src/server/http_server.m
+expect_present "MCP 统计报告监听范围" 'dh_http_listen_mode' src/server/mcp_server.m
 
 echo "== constructor 顺序 =="
 main_file="src/core/main.m"

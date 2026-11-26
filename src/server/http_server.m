@@ -58,6 +58,10 @@ static dispatch_semaphore_t gConcurrency = NULL;  // 限制同时处理的连接
 
 #define DH_HTTP_MAX_CONCURRENCY 8
 
+// 监听地址判定在文件后部 (listen + accept 段) 定义, 这里先声明: /api/stats 要报告 listen 模式.
+static BOOL dh_listen_remote_enabled(void);
+static const char *dh_listen_mode_name(void);
+
 
 // ============================================================
 // 工具
@@ -139,7 +143,9 @@ static void send_response_ex(int fd, int status, NSString *statusMsg, NSString *
     if (contentType) [headers appendFormat:@"Content-Type: %@\r\n", contentType];
     [headers appendFormat:@"Content-Length: %lu\r\n", (unsigned long)body.length];
     [headers appendString:@"Cache-Control: no-store\r\n"];
-    [headers appendString:@"Access-Control-Allow-Origin: *\r\n"];
+    // 不下发 CORS 头: 面板与接口同源(都由本服务吐出), 不需要跨源授权; 而通配
+    // ACAO 会让设备上任何网页/WebView 跨源读取抓到的 key、iv 和明文,
+    // 与本服务"无鉴权"叠加就是一条静默外带通道。
     if (extraHeaders) [headers appendString:extraHeaders];
     [headers appendString:@"Connection: close\r\n\r\n"];
     NSData *hd = [headers dataUsingEncoding:NSUTF8StringEncoding];
@@ -201,6 +207,7 @@ static void handle_stats(int fd) {
         @"categoryNames": catNames,   // 前端据此派生 CAT_CLS, 不再硬编码分类名数组
         @"capture":     capture,
         @"port":        @(gPort),
+        @"listen":      [NSString stringWithUTF8String:dh_listen_mode_name()],   // loopback | any
         @"version":     @DH_HTTP_VERSION,
         @"logBytes":    @(logBytes),
         @"pipeline":    [s pipelineStats],   // 背压/丢弃/RSS: 用于长时间运行稳定性观测
@@ -959,11 +966,10 @@ static void handle_connection(int fd) {
                 send_text(fd, 404, @"not found");
             }
         } else if ([method isEqualToString:@"OPTIONS"]) {
+            // 预检只声明方法, 不回 Access-Control-Allow-*: 跨源请求会被浏览器拦掉.
             NSMutableString *h = [NSMutableString string];
             [h appendString:@"HTTP/1.1 204 No Content\r\n"];
-            [h appendString:@"Access-Control-Allow-Origin: *\r\n"];
-            [h appendString:@"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"];
-            [h appendString:@"Access-Control-Allow-Headers: *\r\n"];
+            [h appendString:@"Allow: GET, POST, OPTIONS\r\n"];
             [h appendString:@"Connection: close\r\n\r\n"];
             NSData *hd = [h dataUsingEncoding:NSUTF8StringEncoding];
             write_all(fd, hd.bytes, hd.length);
@@ -979,6 +985,33 @@ static void handle_connection(int fd) {
 // ============================================================
 // listen + accept loop
 // ============================================================
+
+// 监听地址。注入进程的 HTTP 面带文件/符号/Dump/事件接口且没有鉴权, 绑到 0.0.0.0
+// 等于把目标 App 的沙箱开给同网段任何一台机器。越狱整包已经由 idhjd 承担设备入口,
+// idhjd 自己默认只绑回环, 所以进程内端口跟随同一口径: 默认回环, 只有 idhjd 的
+// listen-remote 标记(显式接受同网段直连)存在才放开局域网。标记在启动时读一次,
+// 加/删标记后需重启目标 App 生效。
+//
+// 巨魔版没有守护进程, 这个端口就是产品入口, 保持原来的局域网监听。
+#if DH_DEVICE_SESSIONS
+#import "../session/idh_session_ipc.h"   // IDHSessionRemotePath: 与 idhjd 共用同一个标记路径
+#endif
+
+static BOOL dh_listen_remote_enabled(void) {
+#if DH_DEVICE_SESSIONS
+    static BOOL enabled = NO;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ enabled = (access(IDHSessionRemotePath.fileSystemRepresentation, F_OK) == 0); });
+    return enabled;
+#else
+    return YES;
+#endif
+}
+
+static const char *dh_listen_mode_name(void) {
+    return dh_listen_remote_enabled() ? "any" : "loopback";
+}
+
 static int try_bind(uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
@@ -987,7 +1020,7 @@ static int try_bind(uint16_t port) {
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = dh_listen_remote_enabled() ? htonl(INADDR_ANY) : htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) { close(fd); return -1; }
     if (listen(fd, DH_HTTP_BACKLOG) != 0) { close(fd); return -1; }
@@ -1054,16 +1087,26 @@ void dh_http_start(void) {
             dh_health_http_fail(portFailure);
             return;
         }
-        NSString *ip = get_local_ip();
+        // 只绑回环时对外地址就是 127.0.0.1: 不再把 Wi-Fi/蜂窝 IP 当成可达入口打印出去.
+        NSString *ip;
+        if (dh_listen_remote_enabled()) {
+            ip = get_local_ip();
+        } else {
+            ip = @"127.0.0.1";
+            // health.localOnly 与 listen 必须同一口径: 回环绑定就是「仅本地」,
+            // 否则 stats 里会出现 listen=loopback 而 localOnly=false 的自相矛盾.
+            dh_health_note_localonly();
+        }
         gURL = [NSString stringWithFormat:@"http://%@:%u/", ip, (unsigned)gPort];
         gAcceptQ = dispatch_queue_create("com.decrypthelper.http.accept", DISPATCH_QUEUE_SERIAL);
         gWorkerQ = dispatch_queue_create("com.decrypthelper.http.worker", DISPATCH_QUEUE_CONCURRENT);
         gConcurrency = dispatch_semaphore_create(DH_HTTP_MAX_CONCURRENCY);
         dispatch_async(gAcceptQ, ^{ accept_loop(); });
         dh_health_http_ok();
-        NSLog(@"[IOSDecryptHub] HTTP 服务已启动: %@", gURL);
+        NSLog(@"[IOSDecryptHub] HTTP 服务已启动: %@ (listen=%s)", gURL, dh_listen_mode_name());
     });
 }
 
 uint16_t  dh_http_port(void)  { return gPort; }
 NSString *dh_http_url(void)   { return gURL ?: @"(not running)"; }
+const char *dh_http_listen_mode(void) { return dh_listen_mode_name(); }
